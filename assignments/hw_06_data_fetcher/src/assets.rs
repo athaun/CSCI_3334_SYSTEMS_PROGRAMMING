@@ -1,5 +1,6 @@
 /*
-    This crate contains the 
+    This crate contains the asset structs and price fetching/saving methods for each.
+    It also contains fetching and saving helpers.
 */
 
 use crate::json;
