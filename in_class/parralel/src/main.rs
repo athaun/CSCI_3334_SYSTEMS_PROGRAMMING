@@ -1,116 +1,353 @@
-use std::arch::x86_64::*;
-use std::time::Instant;
-use std::alloc::{alloc, dealloc, Layout};
+fn data_paralelism_native() {
 
-// Function to create an aligned vector
-fn create_aligned_vec(size: usize, value: f32) -> Vec<f32> {
-    let align = 32; // 32-byte alignment for AVX
-    let layout = Layout::from_size_align(size * std::mem::size_of::<f32>(), align).unwrap();
-    unsafe {
-        let ptr = alloc(layout) as *mut f32;
-        for i in 0..size {
-            *ptr.add(i) = value;
+    use std::sync::{Arc, Mutex};
+    use std::thread;
+    
+    
+    let data = Arc::new(Mutex::new(vec![1, 2, 3, 4, 5]));
+    let len = data.lock().unwrap().len();
+    let mid = len / 2;
+    
+    
+    let left_data = Arc::clone(&data);
+    let left_handle = thread::spawn(move || {
+        let mut left = left_data.lock().unwrap();
+        for x in &mut left[..mid] {
+            *x *= 2;
         }
-        Vec::from_raw_parts(ptr, size, size)
-    }
+    });
+    
+    let right_data = Arc::clone(&data);
+    let right_handle = thread::spawn(move || {
+        let mut right = right_data.lock().unwrap();
+        for x in &mut right[mid..] {
+            *x *= 2;
+        }
+    });
+    
+    left_handle.join().unwrap();
+    right_handle.join().unwrap();
+    
+    println!("{:?}", *data.lock().unwrap()); // [2, 4, 6, 8, 10]
+    
+    
+    // the main problem, I want you to notice, even though it seems like
+    // a fine data paralelism, it has a huge problem.
+    // because you are locking data vector at the moment of updating the value
+    // it basically means, only one thread at a time can update value
+    // even though logically it seems correct it's a overhead
 }
 
+fn data_paralelism_rayon() {
+
+    use rayon::prelude::*;
+    
+    let mut data = vec![1, 2, 3, 4, 5];
+    
+    data.par_iter_mut().for_each(|x| {
+        *x *= 2;
+    });
+    
+    // from code perspective it seems trivial, but I want you to realize how much heavy lifting happens behind the hood:
+    //The Rayon library uses work stealing to dynamically balance the workload among threads, 
+    //providing better performance compared to a static division of work among threads.
+    
+    // on top it creates a separate scope to escape need to lock data
+    
+    
+    
+    // Concept of work stealing and separate scope.
+    
+    
+    
+    println!("{:?}", data); // [2, 4, 6, 8, 10]
+}
+
+fn rayon_iterators_real_power() {
+
+    // https://docs.rs/rayon/latest/rayon/
+    extern crate rayon; // 1.5.3
+    use rayon::prelude::*; // 1.5.3
+    
+    let wiki_txt = " Parallel computing is a type of computation in which many calculations or processes are carried out simultaneously.
+    Large problems can often be divided into smaller ones, which can then be solved at the same time. 
+    There are several different forms of parallel computing: bit-level, instruction-level, data, and task parallelism. 
+    Parallelism has long been employed in high-performance computing, but has gained broader interest due to the physical 
+    constraints preventing frequency scaling.Parallel computing is closely related to concurrent computing—
+    they are frequently used together, and often conflated, though the two are distinct: 
+    it is possible to have parallelism without concurrency, and concurrency without parallelism 
+    (such as multitasking by time-sharing on a single-core CPU).
+    In parallel computing, a computational task is typically broken down into several, often many, 
+    very similar sub-tasks that can be processed independently and whose results are combined afterwards, upon completion. 
+    In contrast, in concurrent computing, the various processes often do not address related tasks; 
+    when they do, as is typical in distributed computing, the separate tasks may have a varied nature and often require some 
+    inter-process communication during execution.";
+    
+    let words:Vec<_> = wiki_txt.split_whitespace().collect();
+    
+    // par_iter() -> parallel iterator
+    
+    words.par_iter().for_each(|val| println!("{}",val));
+    
+    // par_iterator can do everything as regular iterator, but can does it 
+    // in parallel
+    
+    let words_with_p: Vec<_> = words
+        .par_iter()
+        .filter(|val| val.find('p').is_some()) // of course notice the closure FN, which borrows for reading only
+        .collect();
+        
+        
+    println!("All words with letter p: {:?}",words_with_p);
+    
+}
+
+#[allow(unused_variables)]
+fn task_paralelism_native() {
+
+    use std::thread;
+    use std::time::{Duration, Instant};
+    use std::sync::mpsc;
+    
+    fn download_file(file: &str) -> String {
+        thread::sleep(Duration::from_millis(100));
+        format!("{} downloaded", file)
+    }
+    
+    fn resize_image(image: &str) -> String {
+        thread::sleep(Duration::from_millis(100));
+        format!("{} resized", image)
+    }
+
+    let files = vec!["file1.txt", "file2.txt", "file3.txt"];
+    let images = vec!["image1.jpg", "image2.jpg", "image3.jpg"];
+
+    // Sequential execution
+    let start = Instant::now();
+    let downloaded_files: Vec<String> = files.iter().map(|file| download_file(file)).collect();
+    let resized_images: Vec<String> = images.iter().map(|image| resize_image(image)).collect();
+    let duration = start.elapsed();
+    println!("Time elapsed in sequential execution: {:?}", duration);
+
+    // Parallel execution using task parallelism with native Rust threads
+    let start = Instant::now();
+    
+    let (tx1, rx1) = mpsc::channel();
+    let (tx2, rx2) = mpsc::channel();
+    
+    let download_handle = thread::spawn(move || {
+        let result: Vec<String> = files.iter().map(|file| download_file(file)).collect();
+        tx1.send(result).unwrap();
+    });
+    
+    let resize_handle = thread::spawn(move || {
+        let result: Vec<String> = images.iter().map(|image| resize_image(image)).collect();
+        tx2.send(result).unwrap();
+    });
+    
+    let downloaded_files = rx1.recv().unwrap();
+    let resized_images = rx2.recv().unwrap();
+
+    download_handle.join().unwrap();
+    resize_handle.join().unwrap();
+
+    let duration = start.elapsed();
+    println!("Time elapsed in parallel execution (native Rust threads): {:?}", duration);
+
+    println!("Downloaded files: {:?}", downloaded_files);
+    println!("Resized images: {:?}", resized_images);
+}
+
+
+#[allow(unused_variables)]
+fn task_paralelism_rayon(){
+    extern crate rayon;
+    use rayon::prelude::*;
+    use std::time::{Duration, Instant};
+    use std::thread;
+    
+    fn download_file(file: &str) -> String {
+        thread::sleep(Duration::from_millis(100));
+        format!("{} downloaded", file)
+    }
+    
+    fn resize_image(image: &str) -> String {
+        thread::sleep(Duration::from_millis(100));
+        format!("{} resized", image)
+    }
+    
+
+    let files = vec!["file1.txt", "file2.txt", "file3.txt"];
+    let images = vec!["image1.jpg", "image2.jpg", "image3.jpg"];
+
+    // Sequential execution
+    let start = Instant::now();
+    let downloaded_files: Vec<String> = files.iter().map(|file| download_file(file)).collect();
+    let resized_images: Vec<String> = images.iter().map(|image| resize_image(image)).collect();
+    let duration = start.elapsed();
+    println!("Time elapsed in sequential execution: {:?}", duration);
+
+    // Parallel execution using task parallelism
+    let start = Instant::now();
+    let (downloaded_files, resized_images): (Vec<String>, Vec<String>) = rayon::join(
+        || files.par_iter().map(|file| download_file(file)).collect(),
+        || images.par_iter().map(|image| resize_image(image)).collect(),
+    );
+    let duration = start.elapsed();
+    println!("Time elapsed in parallel execution: {:?}", duration);
+
+    println!("Downloaded files: {:?}", downloaded_files);
+    println!("Resized images: {:?}", resized_images);
+}
+
+#[allow(dead_code)]
+fn pipeline_paralelism()
+    {
+        use std::sync::mpsc::{channel, Sender, Receiver};
+        use std::thread;
+        use std::time::Duration;
+        use std::time::Instant;
+        
+        
+        enum Message {
+            Download(String),
+            Process(String),
+            Upload(String),
+            Exit,
+        }
+        
+        struct Downloader {
+            tx: Sender<Message>,
+        }
+        
+        impl Downloader {
+            fn run(&self, files: &[&str]) {
+                for file in files {
+                    thread::sleep(Duration::from_millis(100)); // Simulate download time
+                    let downloaded_file = format!("{} downloaded", file);
+                    self.tx.send(Message::Download(downloaded_file)).unwrap();
+                }
+                self.tx.send(Message::Exit).unwrap();
+            }
+        }
+        
+        struct Processor {
+            tx: Sender<Message>,
+            rx: Receiver<Message>,
+        }
+        
+        impl Processor {
+            fn run(&self) {
+                loop {
+                    match self.rx.recv().unwrap() {
+                        Message::Download(file) => {
+                            thread::sleep(Duration::from_millis(100)); // Simulate processing time
+                            let processed_file = format!("{} processed", file);
+                            self.tx.send(Message::Process(processed_file)).unwrap();
+                        }
+                        Message::Exit => {
+                            self.tx.send(Message::Exit).unwrap();
+                            break;
+                        }
+                        _ => {}
+                    }
+                }
+            }
+        }
+        
+        struct Uploader {
+            rx: Receiver<Message>,
+        }
+        
+        impl Uploader {
+            fn run(&self) -> Vec<String> {
+                let mut uploaded_files = Vec::new();
+        
+                loop {
+                    match self.rx.recv().unwrap() {
+                        Message::Process(file) => {
+                            thread::sleep(Duration::from_millis(100)); // Simulate upload time
+                            let uploaded_file = format!("{} uploaded", file);
+                            uploaded_files.push(uploaded_file);
+                        }
+                        Message::Exit => {
+                            break;
+                        }
+                        _ => {}
+                    }
+                }
+        
+                uploaded_files
+            }
+        }
+        
+        fn sequential(files: &[&str]) -> Vec<String> {
+            let mut uploaded_files = Vec::new();
+        
+            for file in files {
+                thread::sleep(Duration::from_millis(100)); // Simulate download time
+                let downloaded_file = format!("{} downloaded", file);
+        
+                thread::sleep(Duration::from_millis(100)); // Simulate processing time
+                let processed_file = format!("{} processed", downloaded_file);
+        
+                thread::sleep(Duration::from_millis(100)); // Simulate upload time
+                let uploaded_file = format!("{} uploaded", processed_file);
+        
+                uploaded_files.push(uploaded_file);
+            }
+        
+            uploaded_files
+        }
+        
+        let files = vec!["file1.txt", "file2.txt", "file3.txt"];
+    
+        // Sequential version
+        let start = Instant::now();
+        let uploaded_files_sequential = sequential(&files);
+        let duration_sequential = start.elapsed();
+        println!("Sequential duration: {:?}", duration_sequential);
+        println!("Sequential uploaded files: {:?}", uploaded_files_sequential);
+    
+        // Parallel version
+        let start = Instant::now();
+    
+        let (downloader_tx, processor_rx) = channel();
+        let (processor_tx, uploader_rx) = channel();
+    
+        let downloader = Downloader { tx: downloader_tx };
+        let processor = Processor { tx: processor_tx, rx: processor_rx };
+        let uploader = Uploader { rx: uploader_rx };
+    
+        let files_clone = files.clone();
+        let downloader_thread = thread::spawn(move || downloader.run(&files_clone));
+        let processor_thread = thread::spawn(move || processor.run());
+    
+        let uploaded_files_parallel = uploader.run();
+    
+        downloader_thread.join().unwrap();
+        processor_thread.join().unwrap();
+    
+        let duration_parallel = start.elapsed();
+        println!("Parallel duration: {:?}", duration_parallel);
+        println!("Parallel uploaded files: {:?}", uploaded_files_parallel);
+    }
+
 fn main() {
-    let size = 1024 * 1024; // 1M elements
-    let iterations = 100;
-    
-    println!("Vector Addition Benchmark");
-    println!("Array size: {} elements", size);
-    println!("Iterations: {}\n", iterations);
+    //#1) Data Paralelism
+    // data_paralelism_native();
+    // data_paralelism_rayon();
+    // rayon_iterators_real_power();
 
-    // 1. Regular Addition
-    let a1 = vec![1.0_f32; size];
-    let b1 = vec![2.0_f32; size];
-    let mut result1 = vec![0.0_f32; size];
-    
-    let mut regular_time = 0.0;
-    for _ in 0..iterations {
-        let start = Instant::now();
-        for i in 0..size {
-            result1[i] = a1[i] + b1[i];
-        }
-        regular_time += start.elapsed().as_secs_f64() * 1000.0;
-    }
+    // //#2 Task Paralelism
+    // task_paralelism_native();
+    // task_paralelism_rayon();
 
-    // 2. SIMD Addition (unaligned)
-    let a2 = vec![1.0_f32; size];
-    let b2 = vec![2.0_f32; size];
-    let mut result2 = vec![0.0_f32; size];
-    
-    let mut simd_time = 0.0;
-    for _ in 0..iterations {
-        let start = Instant::now();
-        unsafe {
-            let chunks = size / 8;
-            for i in 0..chunks {
-                let idx = i * 8;
-                let a_vec = _mm256_loadu_ps(a2.as_ptr().add(idx));
-                let b_vec = _mm256_loadu_ps(b2.as_ptr().add(idx));
-                let sum = _mm256_add_ps(a_vec, b_vec);
-                _mm256_storeu_ps(result2.as_mut_ptr().add(idx), sum);
-            }
-            // Handle remaining elements
-            for i in (chunks * 8)..size {
-                result2[i] = a2[i] + b2[i];
-            }
-        }
-        simd_time += start.elapsed().as_secs_f64() * 1000.0;
-    }
+    //#3 Pipeline Parallelism: Most challenging:)
+    pipeline_paralelism();
 
-    // 3. Aligned SIMD Addition
-    let a3 = create_aligned_vec(size, 1.0);
-    let b3 = create_aligned_vec(size, 2.0);
-    let mut result3 = create_aligned_vec(size, 0.0);
-    
-    let mut aligned_time = 0.0;
-    for _ in 0..iterations {
-        let start = Instant::now();
-        unsafe {
-            let chunks = size / 8;
-            for i in 0..chunks {
-                let idx = i * 8;
-                let a_vec = _mm256_load_ps(a3.as_ptr().add(idx));
-                let b_vec = _mm256_load_ps(b3.as_ptr().add(idx));
-                let sum = _mm256_add_ps(a_vec, b_vec);
-                _mm256_store_ps(result3.as_mut_ptr().add(idx), sum);
-            }
-            // Handle remaining elements
-            for i in (chunks * 8)..size {
-                result3[i] = a3[i] + b3[i];
-            }
-        }
-        aligned_time += start.elapsed().as_secs_f64() * 1000.0;
-    }
-
-    // Calculate averages
-    let avg_regular = regular_time / iterations as f64;
-    let avg_simd = simd_time / iterations as f64;
-    let avg_aligned = aligned_time / iterations as f64;
-
-    // Print results
-    println!("1. Regular Addition     : {:.3} ms", avg_regular);
-    println!("2. SIMD Addition       : {:.3} ms ({:.2}x speedup)", 
-             avg_simd, avg_regular/avg_simd);
-    println!("3. Aligned SIMD        : {:.3} ms ({:.2}x speedup)", 
-             avg_aligned, avg_regular/avg_aligned);
-    
-    // Verify results are correct
-    println!("\nVerification:");
-    println!("Regular sum : {}", result1.iter().sum::<f32>());
-    println!("SIMD sum    : {}", result2.iter().sum::<f32>());
-    println!("Aligned sum : {}", result3.iter().sum::<f32>());
-
-    // Print memory alignment info
-    println!("\nMemory Alignment:");
-    println!("Regular: {:p} (mod 32 = {})", a1.as_ptr(), 
-             (a1.as_ptr() as usize) % 32);
-    println!("SIMD   : {:p} (mod 32 = {})", a2.as_ptr(), 
-             (a2.as_ptr() as usize) % 32);
-    println!("Aligned: {:p} (mod 32 = {})", a3.as_ptr(), 
-             (a3.as_ptr() as usize) % 32);
+    // It's just first approach. But good for starter.
+    // You gonna laugh, but it's just a surface
+    // To really being implement pipeline paralellism, we need to learn
+    // asynchronious programming concepts
 }
